@@ -78,19 +78,6 @@ return view.extend({
         o.value('modbus-rtu', 'Modbus RTU');
         o.value('bacnet-mstp', 'BACnet MS/TP');
         o.default = 'modbus-rtu';
-        o.validate = function(section_id, value) {
-            if (value === 'bacnet-mstp') {
-                return _('BACnet MS/TP is not supported yet. Please select Modbus RTU.');
-            }
-            return true;
-        };
-
-        // Development notice for BACnet MS/TP
-        o = s.option(form.DummyValue, '_bacnet_notice', _('Notice'));
-        o.depends('type', 'bacnet-mstp');
-        o.cfgvalue = function() {
-            return _('The function is under development, please pay attention to subsequent OTA updates.');
-        };
 
         o = s.option(form.Value, 'device_address', _('Device Address (Slave ID)'), _('Value can be entered in hexadecimal (0x) or decimal format.'));
         o.depends('type', 'modbus-rtu');
@@ -340,12 +327,146 @@ return view.extend({
         o.depends({'type': 'modbus-rtu', 'function_code': '16'});
 
         // Result display area
-        o = s.option(form.DummyValue, '_result_display', _('Frame Data'));
+        o = s.option(form.DummyValue, '_result_display', _('RS485 Data Display'));
         o.depends('type', 'modbus-rtu');
         o.rawhtml = true;
         o.cfgvalue = function() {
             return '<div style="margin-top:10px;">' +
-                   '<textarea id="modbus_result" readonly style="width:100%;min-height:100px;font-family:monospace;padding:8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;" placeholder="Frame data..."></textarea>' +
+                   '<textarea id="modbus_result" readonly style="width:100%;min-height:100px;font-family:monospace;padding:8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;" placeholder="Modbus data will appear here..."></textarea>' +
+                   '</div>';
+        };
+
+        // ========== BACnet MS/TP Configuration ==========
+
+        // BACnet Device MAC Address
+        o = s.option(form.Value, 'device_mac', _('Device MAC Address'), _('BACnet device MAC address (0-127).'));
+        o.depends('type', 'bacnet-mstp');
+        o.datatype = 'range(0,127)';
+        o.placeholder = '2';
+        o.default = '2';
+        o.rmempty = false;
+
+        // BACnet Work Mode
+        o = s.option(form.ListValue, 'bacnet_work_mode', _('Work Mode'));
+        o.depends('type', 'bacnet-mstp');
+        o.value('once', _('Read Once'));
+        o.value('poll', _('Poll Periodic'));
+        o.default = 'once';
+
+        // BACnet Polling Interval
+        o = s.option(form.Value, 'polling_interval', _('Polling Interval (seconds)'),
+            _('Interval between periodic polls. Must be an integer between 1 and 3600.'));
+        o.depends('type', 'bacnet-mstp');
+        o.datatype = 'range(1,3600)';
+        o.placeholder = '5';
+        o.default = '5';
+        o.rmempty = false;
+        o.depends({'type': 'bacnet-mstp', 'bacnet_work_mode': 'poll'});
+
+        // BACnet Object Type
+        o = s.option(form.ListValue, 'object_type', _('Object Type'));
+        o.depends('type', 'bacnet-mstp');
+        o.value('analogInput', 'Analog Input');
+        o.value('analogOutput', 'Analog Output');
+        o.value('analogValue', 'Analog Value');
+        o.value('binaryInput', 'Binary Input');
+        o.value('binaryOutput', 'Binary Output');
+        o.value('binaryValue', 'Binary Value');
+        o.default = 'analogInput';
+
+        // BACnet Object Instance
+        o = s.option(form.Value, 'object_instance', _('Object Instance'), _('Object instance number.'));
+        o.depends('type', 'bacnet-mstp');
+        o.datatype = 'range(0,4194303)';
+        o.placeholder = '0';
+        o.default = '0';
+        o.rmempty = false;
+
+        // BACnet Property Identifier
+        o = s.option(form.ListValue, 'property_identifier', _('Property Identifier'));
+        o.depends('type', 'bacnet-mstp');
+        o.value('presentValue', 'Present Value');
+        o.value('statusFlags', 'Status Flags');
+        o.value('units', 'Units');
+        o.value('description', 'Description');
+        o.value('objectName', 'Object Name');
+        o.value('objectType', 'Object Type');
+        o.default = 'presentValue';
+
+        // BACnet Read Data button
+        o = s.option(form.Button, '_bacnet_read_btn', _('Read Data'));
+        o.inputtitle = _('Read Data');
+        o.inputstyle = 'apply';
+        o.depends({'type': 'bacnet-mstp', 'bacnet_work_mode': 'once'});
+        o.description = _('Click to read data from the BACnet device once.');
+        o.onclick = L.bind(function (ev) {
+            var btn = ev.target;
+            var resultArea = document.getElementById('bacnet_result');
+
+            btn.disabled = true;
+            btn.innerText = _('Reading...');
+
+            // Create trigger file
+            return fs.exec('/bin/sh', ['-c', 'mkdir -p /tmp/rs485 && echo \'{"device_id":\'$(uci get rs485-module.bacnet.device_mac)\', "object_type":"\'$(uci get rs485-module.bacnet.object_type)\'", "object_instance":\'$(uci get rs485-module.bacnet.object_instance)\', "property_identifier":"\'$(uci get rs485-module.bacnet.property_identifier)\'"}\' > /tmp/rs485/bacnet_read'])
+                .then(function() {
+                    // Poll for result file (max 5 seconds)
+                    var pollCount = 0;
+                    var pollInterval = setInterval(function () {
+                        pollCount++;
+
+                        L.resolveDefault(fs.read('/tmp/rs485/bacnet_result'))
+                            .then(function (content) {
+                                if (content) {
+                                    clearInterval(pollInterval);
+                                    if (resultArea) {
+                                        try {
+                                            var data = JSON.parse(content);
+                                            if (data.success) {
+                                                resultArea.value = 'Value: ' + data.value + ' (' + data.timestamp + ')';
+                                                resultArea.style.color = '#000';
+                                            } else {
+                                                resultArea.value = 'Error: ' + data.error;
+                                                resultArea.style.color = '#d00';
+                                            }
+                                        } catch(e) {
+                                            resultArea.value = content;
+                                            resultArea.style.color = '#000';
+                                        }
+                                    }
+                                    btn.disabled = false;
+                                    btn.innerText = _('Read Data');
+                                    // Clean up files
+                                    fs.exec('/bin/sh', ['-c', 'rm -f /tmp/rs485/bacnet_read /tmp/rs485/bacnet_result']);
+                                }
+                            })
+                            .catch(function (err) {
+                                if (pollCount >= 50) {
+                                    clearInterval(pollInterval);
+                                    if (resultArea) {
+                                        resultArea.value = 'Timeout: No response from BACnet device';
+                                        resultArea.style.color = '#d00';
+                                    }
+                                    btn.disabled = false;
+                                    btn.innerText = _('Read Data');
+                                    // Clean up files
+                                    fs.exec('/bin/sh', ['-c', 'rm -f /tmp/rs485/bacnet_read /tmp/rs485/bacnet_result']);
+                                }
+                            });
+                    }, 100);
+                });
+        }, this);
+
+        // BACnet Result display area
+        o = s.option(form.DummyValue, '_bacnet_result_display', _('BACnet Data Display'));
+        o.depends('type', 'bacnet-mstp');
+        o.rawhtml = true;
+        o.cfgvalue = function() {
+            return '<div style="margin-top:10px;">' +
+                   '<textarea id="bacnet_result" readonly style="width:100%;min-height:100px;font-family:monospace;padding:8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;" placeholder="BACnet data will appear here..."></textarea>' +
+                   '<div style="margin-top:5px;display:flex;gap:10px;">' +
+                   '<button type="button" class="cbi-button cbi-button-action" id="bacnet_autorefresh_btn">Auto-refresh: OFF</button>' +
+                   '<button type="button" class="cbi-button cbi-button-reset" id="bacnet_clear_btn">Clear</button>' +
+                   '</div>' +
                    '</div>';
         };
 
@@ -358,50 +479,95 @@ return view.extend({
                     clearInterval(periodicTimer);
                     periodicTimer = null;
                 }
-                
+
                 return uci.load('rs485-module').then(function() {
-                    var workMode = uci.get('rs485-module', 'protocol', 'work_mode');
-                    var functionCode = uci.get('rs485-module', 'protocol', 'function_code');
-                    var pollInterval = parseInt(uci.get('rs485-module', 'protocol', 'poll_interval')) || 10;
-                    var protocolEnabled = uci.get('rs485-module', 'protocol', 'enabled');
-                    
-                    // Only start timer for periodic mode with read function codes (01-04)
-                    if (protocolEnabled === '1' && workMode === 'periodic' && ['01', '02', '03', '04'].indexOf(functionCode) !== -1) {
-                        periodicTimer = setInterval(function() {
-                            var resultArea = document.getElementById('modbus_result');
-                            if (!resultArea) return;
-                            
-                            // Create trigger file
-                            fs.exec('/bin/sh', ['-c', 'mkdir -p /tmp/rs485 && touch /tmp/rs485/modbus_read'])
-                                .then(function() {
-                                    // Poll for result file (max 5 seconds)
-                                    var pollCount = 0;
-                                    var pollInterval = setInterval(function() {
-                                        pollCount++;
-                                        
-                                        L.resolveDefault(fs.read('/tmp/rs485/modbus_result'))
-                                            .then(function(content) {
-                                                if (content) {
-                                                    clearInterval(pollInterval);
-                                                    if (content.startsWith('Error:')) {
-                                                        resultArea.value = content;
-                                                        resultArea.style.color = '#d00';
-                                                    } else {
-                                                        resultArea.value = content;
-                                                        resultArea.style.color = '#000';
-                                                    }
-                                                    fs.exec('/bin/sh', ['-c', 'rm -f /tmp/rs485/modbus_read /tmp/rs485/modbus_result']);
+                    var protocolType = uci.get('rs485-module', 'protocol', 'type');
+
+                    // BACnet MS/TP periodic poll mode
+                    if (protocolType === 'bacnet-mstp') {
+                        var bacnetEnabled = uci.get('rs485-module', 'bacnet', 'enabled');
+                        var bacnetWorkMode = uci.get('rs485-module', 'bacnet', 'work_mode');
+                        var pollInterval = parseInt(uci.get('rs485-module', 'bacnet', 'polling_interval')) || 5;
+
+                        if (bacnetEnabled === '1' && bacnetWorkMode === 'poll') {
+                            periodicTimer = setInterval(function() {
+                                var resultArea = document.getElementById('bacnet_result');
+                                if (!resultArea) return;
+
+                                // Read log file to get BACnet data
+                                callFileRead('/tmp/rs485/log').then(function(content) {
+                                    if (content) {
+                                        // Parse the latest BACnet data from log
+                                        var lines = content.split('\n');
+                                        var lastBacnetData = null;
+                                        for (var i = lines.length - 1; i >= 0; i--) {
+                                            if (lines[i].match(/bacnet-uplink|BACnet.*success/)) {
+                                                var jsonMatch = lines[i].match(/\{[^}]*\}/);
+                                                if (jsonMatch) {
+                                                    try {
+                                                        lastBacnetData = JSON.parse(jsonMatch[0]);
+                                                        break;
+                                                    } catch(e) {}
                                                 }
-                                            })
-                                            .catch(function() {
-                                                if (pollCount >= 50) {
-                                                    clearInterval(pollInterval);
-                                                    fs.exec('/bin/sh', ['-c', 'rm -f /tmp/rs485/modbus_read /tmp/rs485/modbus_result']);
-                                                }
-                                            });
-                                    }, 100);
+                                            }
+                                        }
+                                        if (lastBacnetData && lastBacnetData.success !== false) {
+                                            resultArea.value = 'Value: ' + lastBacnetData.value + '\nTimestamp: ' + lastBacnetData.timestamp;
+                                            resultArea.style.color = '#000';
+                                        } else {
+                                            resultArea.value = 'Waiting for data...';
+                                            resultArea.style.color = '#888';
+                                        }
+                                    }
                                 });
-                        }, pollInterval * 1000);
+                            }, pollInterval * 1000);
+                        }
+                    }
+                    // Modbus RTU periodic mode
+                    else {
+                        var workMode = uci.get('rs485-module', 'protocol', 'work_mode');
+                        var functionCode = uci.get('rs485-module', 'protocol', 'function_code');
+                        var pollInterval = parseInt(uci.get('rs485-module', 'protocol', 'poll_interval')) || 10;
+                        var protocolEnabled = uci.get('rs485-module', 'protocol', 'enabled');
+
+                        // Only start timer for periodic mode with read function codes (01-04)
+                        if (protocolEnabled === '1' && workMode === 'periodic' && ['01', '02', '03', '04'].indexOf(functionCode) !== -1) {
+                            periodicTimer = setInterval(function() {
+                                var resultArea = document.getElementById('modbus_result');
+                                if (!resultArea) return;
+
+                                // Create trigger file
+                                fs.exec('/bin/sh', ['-c', 'mkdir -p /tmp/rs485 && touch /tmp/rs485/modbus_read'])
+                                    .then(function() {
+                                        // Poll for result file (max 5 seconds)
+                                        var pollCount = 0;
+                                        var pollInterval = setInterval(function() {
+                                            pollCount++;
+
+                                            L.resolveDefault(fs.read('/tmp/rs485/modbus_result'))
+                                                .then(function(content) {
+                                                    if (content) {
+                                                        clearInterval(pollInterval);
+                                                        if (content.startsWith('Error:')) {
+                                                            resultArea.value = content;
+                                                            resultArea.style.color = '#d00';
+                                                        } else {
+                                                            resultArea.value = content;
+                                                            resultArea.style.color = '#000';
+                                                        }
+                                                        fs.exec('/bin/sh', ['-c', 'rm -f /tmp/rs485/modbus_read /tmp/rs485/modbus_result']);
+                                                    }
+                                                })
+                                                .catch(function() {
+                                                    if (pollCount >= 50) {
+                                                        clearInterval(pollInterval);
+                                                        fs.exec('/bin/sh', ['-c', 'rm -f /tmp/rs485/modbus_read /tmp/rs485/modbus_result']);
+                                                    }
+                                                });
+                                        }, 100);
+                                    });
+                            }, pollInterval * 1000);
+                        }
                     }
                 });
             }
