@@ -6,14 +6,15 @@
 mod mstp;
 mod bacnet;
 
-use chrono::Local;
+use chrono::{Local, Datelike};
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tokio_serial::{DataBits, Parity, StopBits};
@@ -25,6 +26,31 @@ use bacnet::{
     BacnetObjectType, BacnetProperty, BacnetValue, ObjectIdentifier,
     Apdu,
 };
+
+// Global startup time for logger
+static START_TIME: OnceLock<Instant> = OnceLock::new();
+
+/// Initialize timezone from UCI system configuration
+fn init_timezone() {
+    match std::process::Command::new("uci")
+        .args(&["get", "system.@system[0].timezone"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            if let Ok(tz) = String::from_utf8(output.stdout) {
+                let tz = tz.trim();
+                if !tz.is_empty() && tz != "UTC" {
+                    std::env::set_var("TZ", tz);
+                    eprintln!("Timezone set from UCI: {}", tz);
+                }
+            }
+        }
+        _ => {
+            // Fallback to UTC if UCI read fails
+            std::env::set_var("TZ", "UTC");
+        }
+    }
+}
 
 // Global constants for file paths
 const TRIGGER_READ_PATH: &str = "/tmp/rs485/bacnet_read";
@@ -262,11 +288,24 @@ impl MstpTransport {
 
 // Log message to file
 fn log_message(message: &str) {
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+    let timestamp = get_timestamp();
     let log_entry = format!("[{}] {}\n", timestamp, message);
 
     if let Ok(mut file) = File::open(LOG_PATH) {
         let _ = file.write_all(log_entry.as_bytes());
+    }
+}
+
+fn get_timestamp() -> String {
+    let now = Local::now();
+    // Check if system time is valid (year >= 2024 means time is synced)
+    if now.year() >= 2024 {
+        now.format("%Y-%m-%d %H:%M:%S").to_string()
+    } else {
+        // Use relative uptime when system time is not synced
+        let start = START_TIME.get().unwrap();
+        let uptime_secs = start.elapsed().as_secs();
+        format!("+{}s", uptime_secs)
     }
 }
 
@@ -798,6 +837,12 @@ async fn handle_mqtt_downlink(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize timezone from UCI system configuration
+    init_timezone();
+
+    // Initialize startup time for logger
+    let _ = START_TIME.get_or_init(|| Instant::now());
+
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();

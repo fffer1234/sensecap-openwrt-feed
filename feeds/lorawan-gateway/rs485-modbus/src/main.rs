@@ -1,5 +1,6 @@
-use chrono::Local;
+use chrono::{Local, Datelike};
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
+use std::time::Instant;
 use rumqttc::tokio_rustls::rustls::ClientConfig as RustlsClientConfig;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,28 @@ use tokio::time::sleep;
 use tokio_serial::{DataBits, Parity, StopBits, SerialPortBuilderExt};
 use tokio_modbus::prelude::*;
 use std::path::Path;
+
+/// Initialize timezone from UCI system configuration
+fn init_timezone() {
+    match Command::new("uci")
+        .args(&["get", "system.@system[0].timezone"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            if let Ok(tz) = String::from_utf8(output.stdout) {
+                let tz = tz.trim();
+                if !tz.is_empty() && tz != "UTC" {
+                    std::env::set_var("TZ", tz);
+                    eprintln!("Timezone set from UCI: {}", tz);
+                }
+            }
+        }
+        _ => {
+            // Fallback to UTC if UCI read fails
+            std::env::set_var("TZ", "UTC");
+        }
+    }
+}
 
 // Global constants for file paths
 const trigger_read_path: &str = "/tmp/rs485/modbus_read";
@@ -86,12 +109,14 @@ struct DownlinkMessage {
 // Logger Structure
 struct Logger {
     file: StdMutex<Option<File>>,
+    start_time: Instant,
 }
 
 impl Logger {
     fn new() -> Self {
         Logger {
             file: StdMutex::new(None),
+            start_time: Instant::now(),
         }
     }
 
@@ -107,7 +132,7 @@ impl Logger {
     }
 
     fn log(&self, message: &str) {
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let timestamp = self.get_timestamp();
         let log_line = format!("[{}][RS485-Modbus]: {}\n", timestamp, message);
         print!("{}", log_line);
         if let Ok(mut file_guard) = self.file.lock() {
@@ -115,6 +140,18 @@ impl Logger {
                 let _ = file.write_all(log_line.as_bytes());
                 let _ = file.flush();
             }
+        }
+    }
+
+    fn get_timestamp(&self) -> String {
+        let now = Local::now();
+        // Check if system time is valid (year >= 2024 means time is synced)
+        if now.year() >= 2024 {
+            now.format("%Y-%m-%d %H:%M:%S").to_string()
+        } else {
+            // Use relative uptime when system time is not synced
+            let uptime_secs = self.start_time.elapsed().as_secs();
+            format!("+{}s", uptime_secs)
         }
     }
 }
@@ -713,6 +750,9 @@ async fn read_modbus_data(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Initialize timezone from UCI system configuration
+    init_timezone();
+
     let logger = Arc::new(Logger::new());
     logger.init()?;
     logger.log("RS485-Modbus Bridge starting...");

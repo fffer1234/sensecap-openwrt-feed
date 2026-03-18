@@ -1,4 +1,4 @@
-use chrono::Local;
+use chrono::{Local, Datelike};
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
 use rumqttc::tokio_rustls::rustls::ClientConfig as RustlsClientConfig;
 use rustls_pemfile::{certs, pkcs8_private_keys};
@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::process::Command;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tokio_serial::{DataBits, Parity, StopBits, SerialPortBuilderExt};
@@ -91,6 +91,7 @@ struct DownlinkMessage {
 // Logger Structure
 struct Logger {
     file: StdMutex<Option<File>>,
+    start_time: Instant,
 }
 
 // Logger Implementation
@@ -99,6 +100,7 @@ impl Logger {
     fn new() -> Self {
         Logger {
             file: StdMutex::new(None),
+            start_time: Instant::now(),
         }
     }
 
@@ -121,7 +123,7 @@ impl Logger {
 
     fn log(&self, message: &str) {
         // Get current timestamp
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let timestamp = self.get_timestamp();
         // Format log line
         let log_line = format!("[{}][RS485-MQTT]: {}\n", timestamp, message);
         print!("{}", log_line);
@@ -132,6 +134,18 @@ impl Logger {
                 let _ = file.write_all(log_line.as_bytes());
                 let _ = file.flush();
             }
+        }
+    }
+
+    fn get_timestamp(&self) -> String {
+        let now = Local::now();
+        // Check if system time is valid (year >= 2024 means time is synced)
+        if now.year() >= 2024 {
+            now.format("%Y-%m-%d %H:%M:%S").to_string()
+        } else {
+            // Use relative uptime when system time is not synced
+            let uptime_secs = self.start_time.elapsed().as_secs();
+            format!("+{}s", uptime_secs)
         }
     }
 }
